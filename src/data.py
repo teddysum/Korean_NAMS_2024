@@ -1,10 +1,13 @@
+
 import json
+
 import torch
 from torch.utils.data import Dataset
 
+
 class CustomDataset(Dataset):
-    def __init__(self, fname, tokenizer, max_source_length=1024, max_target_length=512):
-        IGNORE_INDEX = -100
+    def __init__(self, fname, tokenizer):
+        IGNORE_INDEX=-100
         self.inp = []
         self.label = []
 
@@ -22,6 +25,7 @@ class CustomDataset(Dataset):
                 start_id = int(keyword_sentence_id.split('.')[-1]) - 20
                 if start_id < 0:
                     start_id = 0
+
                 end_id = start_id + 40
                 if end_id > len(inp['conversation']):
                     end_id = len(inp['conversation'])
@@ -40,49 +44,34 @@ class CustomDataset(Dataset):
             chat = chat + "\n\n" + question
 
             return chat
-
+        
         for example in data:
             chat = make_chat(example["input"])
             message = [
                 {"role": "system", "content": PROMPT},
                 {"role": "user", "content": chat},
             ]
-
-            # source 텍스트에 대해 max_length 및 truncation 적용
+     
             source = tokenizer.apply_chat_template(
                 message,
                 add_generation_prompt=True,
                 return_tensors="pt",
             )
+            if source.shape[1] > 1024:
+                source = source[:, -1024:]  # 시퀀스 길이 제한 (뒤에서부터 1024개 선택)
+            # print(source)
 
-            # source의 길이 제한
-            source_truncated = tokenizer(
-                source['input_ids'][0],  # 입력 시퀀스
-                max_length=max_source_length,  # 입력의 최대 길이 제한
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt"
-            )
-
-            # target 텍스트에 대한 처리
             target = example["output"]
             if target != "":
                 target += tokenizer.eos_token
-            target = tokenizer(
-                target,
-                return_attention_mask=False,
-                add_special_tokens=False,
-                return_tensors="pt",
-                max_length=max_target_length,  # target의 최대 길이 제한
-                truncation=True
-            )
+            target = tokenizer(target,
+                      return_attention_mask=False,
+                      add_special_tokens=False,
+                      return_tensors="pt")
             target["input_ids"] = target["input_ids"].type(torch.int64)
 
-            # source와 target 병합
-            input_ids = torch.concat((source_truncated['input_ids'][0], target["input_ids"][0]))
-            labels = torch.concat((torch.LongTensor([IGNORE_INDEX] * source_truncated['input_ids'].shape[1]), target["input_ids"][0]))
-
-            # 최종 결과 추가
+            input_ids = torch.concat((source[0], target["input_ids"][0]))
+            labels = torch.concat((torch.LongTensor([IGNORE_INDEX] * source[0].shape[0]), target["input_ids"][0]))
             self.inp.append(input_ids)
             self.label.append(labels)
 
@@ -90,10 +79,8 @@ class CustomDataset(Dataset):
         return len(self.inp)
 
     def __getitem__(self, idx):
-        return {
-            'input_ids': self.inp[idx],
-            'labels': self.label[idx]
-        }
+        return self.inp[idx]
+
 
 class DataCollatorForSupervisedDataset(object):
     def __init__(self, tokenizer):
@@ -104,9 +91,7 @@ class DataCollatorForSupervisedDataset(object):
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(ids) for ids in input_ids], batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(lbls) for lbls in labels], batch_first=True, padding_value=-100
-        )
+        labels = torch.nn.utils.rnn.pad_sequence([torch.tensor(lbls) for lbls in labels], batch_first=True, padding_value=-100)
         return dict(
             input_ids=input_ids,
             labels=labels,
